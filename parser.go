@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"log"
 )
@@ -51,7 +52,12 @@ func parsePacket(packetStr []byte) (Packet, error) {
 	}
 
 	if packetStr[0] == 'b' {
-		packetData := packetStr[1:]
+		packetDataEncoded := packetStr[1:]
+		// decode base64
+		packetData, err := base64.StdEncoding.DecodeString(string(packetDataEncoded))
+		if err != nil {
+			return Packet{}, err
+		}
 		return Packet{Type: PacketTypeMessage, Data: packetData, IsBinary: true}, nil
 	} else {
 		packetType := PacketType(packetStr[0] - '0')
@@ -77,13 +83,18 @@ func parsePayload(payloadStr []byte) ([]Packet, error) {
 
 func (p Packet) Encode() []byte {
 	if p.Type == PacketTypeMessage {
-		var ty MessageType
+		var (
+			ty   MessageType
+			data []byte
+		)
 		if p.IsBinary {
 			ty = MessageTypeBinary
+			data = []byte(base64.StdEncoding.EncodeToString(p.Data))
 		} else {
 			ty = MessageTypeText
+			data = p.Data
 		}
-		return encodeMessagePacket(ty, p.Data)
+		return encodeMessagePacket(ty, data)
 	} else {
 		return []byte{byte(p.Type) + '0'}
 	}
