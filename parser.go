@@ -88,3 +88,7 @@ func encodeMessagePacket(ty MessageType, data []byte) []byte {
 func encodePayload(packetStrs [][]byte) []byte {
 	return bytes.Join(packetStrs, []byte{'\x1e'})
 }
+
+func encodeClosePacket() []byte {
+	return []byte{byte(PacketTypeClose) + '0'}
+}

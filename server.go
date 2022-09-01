@@ -59,12 +59,24 @@ type Message struct {
 
 type OnMessageHandler func(data Message)
 
+type cancelReason int
+
+const (
+	cancelReasonBadRequest cancelReason = iota
+	cancelReasonDoublePolling
+)
+
 type ServerSocket struct {
-	sid              string
+	sid string
+
 	onMessageHandler OnMessageHandler
 	messageQueue     chan Message
-	ctx              context.Context
-	canceler         context.CancelFunc
+
+	ctx          context.Context
+	canceler     context.CancelFunc
+	cancelReason cancelReason
+
+	isPollingNow bool
 }
 
 func (ss *ServerSocket) SetOnMessageHandler(handler OnMessageHandler) {
@@ -75,13 +87,14 @@ func (ss *ServerSocket) Sid() string {
 	return ss.sid
 }
 
-func (ss *ServerSocket) WaitForMessage() ([]Message, bool) {
+func (ss *ServerSocket) WaitForMessage() ([]Message, *cancelReason) {
 	// wait for the first message
 	var firstMsg Message
 	select {
 	case firstMsg = <-ss.messageQueue:
 	case <-ss.ctx.Done():
-		return nil, false
+		reason := ss.cancelReason
+		return nil, &reason
 	}
 	msgs := []Message{firstMsg}
 
@@ -92,13 +105,14 @@ LOOP:
 		case msg := <-ss.messageQueue:
 			msgs = append(msgs, msg)
 		case <-ss.ctx.Done():
-			return nil, false
+			reason := ss.cancelReason
+			return nil, &reason
 		default:
 			break LOOP
 		}
 	}
 
-	return msgs, true
+	return msgs, nil
 }
 
 func (ss *ServerSocket) Send(ty MessageType, data []byte) {
@@ -257,11 +271,26 @@ func (s *Server) messageIn(w http.ResponseWriter, r *http.Request, transport str
 }
 
 func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *ServerSocket) {
-	log.Printf("messageInPolling: WaitForMessage")
-	msgs, ok := ss.WaitForMessage()
-	if !ok {
-		w.WriteHeader(http.StatusBadRequest)
+	if ss.isPollingNow {
+		log.Println("messageInPolling: already polling")
+		w.WriteHeader(http.StatusInternalServerError)
+		s.DropConnection(ss, cancelReasonDoublePolling)
 		return
+	}
+
+	ss.isPollingNow = true
+
+	log.Printf("messageInPolling: WaitForMessage")
+	msgs, cancelReason := ss.WaitForMessage()
+	if cancelReason != nil {
+		graceful := *cancelReason == cancelReasonDoublePolling
+		if graceful {
+			w.Write(encodeClosePacket())
+			return
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 	}
 	log.Printf("messageInPolling: WaitForMessage done")
 
@@ -277,6 +306,8 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 	w.Header().Set("Content-Type", "text/plain")
 	w.Header().Set("charset", "UTF-8")
 	w.Write(payload)
+
+	ss.isPollingNow = false
 }
 
 func (s *Server) messageOut(w http.ResponseWriter, r *http.Request, transport string, sid string) {
@@ -301,7 +332,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	if err != nil {
 		log.Print(err)
 		w.WriteHeader(http.StatusInternalServerError)
-		s.DropConnection(ss)
+		s.DropConnection(ss, cancelReasonBadRequest)
 		return
 	}
 
@@ -310,7 +341,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	packets, err := parsePayload(body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		s.DropConnection(ss)
+		s.DropConnection(ss, cancelReasonBadRequest)
 		return
 	}
 
@@ -320,7 +351,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	for _, packet := range packets {
 		if packet.Type != PacketTypeMessage {
 			w.WriteHeader(http.StatusBadRequest)
-			s.DropConnection(ss)
+			s.DropConnection(ss, cancelReasonBadRequest)
 			return
 		}
 	}
@@ -348,7 +379,8 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	w.Write([]byte("ok"))
 }
 
-func (s *Server) DropConnection(ss *ServerSocket) {
+func (s *Server) DropConnection(ss *ServerSocket, reason cancelReason) {
+	ss.cancelReason = reason
 	ss.canceler()
 
 	s.socketsLock.Lock()
