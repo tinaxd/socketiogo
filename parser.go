@@ -46,14 +46,17 @@ func sliceSplit(s []byte, sep byte) [][]byte {
 	return res
 }
 
-func parsePacket(packetStr []byte) (Packet, error) {
+func parsePacket(packetStr []byte, isBinaryWebSocket bool) (Packet, error) {
+	if isBinaryWebSocket {
+		return Packet{Type: PacketTypeMessage, Data: packetStr, IsBinary: true}, nil
+	}
+
 	if len(packetStr) == 0 {
 		return Packet{}, errors.New("invalid packet format")
 	}
 
-	if packetStr[0] == 'b' {
+	if !isBinaryWebSocket && packetStr[0] == 'b' {
 		packetDataEncoded := packetStr[1:]
-		// decode base64
 		packetData, err := base64.StdEncoding.DecodeString(string(packetDataEncoded))
 		if err != nil {
 			return Packet{}, err
@@ -71,7 +74,7 @@ func parsePayload(payloadStr []byte) ([]Packet, error) {
 	packets := make([]Packet, len(packetStrs))
 
 	for i, packetStr := range packetStrs {
-		packet, err := parsePacket(packetStr)
+		packet, err := parsePacket(packetStr, false)
 		if err != nil {
 			return nil, err
 		}
@@ -81,20 +84,15 @@ func parsePayload(payloadStr []byte) ([]Packet, error) {
 	return packets, nil
 }
 
-func (p Packet) Encode() []byte {
+func (p Packet) Encode(useWebSocket bool) []byte {
 	if p.Type == PacketTypeMessage {
-		var (
-			ty   MessageType
-			data []byte
-		)
+		var ty MessageType
 		if p.IsBinary {
 			ty = MessageTypeBinary
-			data = []byte(base64.StdEncoding.EncodeToString(p.Data))
 		} else {
 			ty = MessageTypeText
-			data = p.Data
 		}
-		return encodeMessagePacket(ty, data)
+		return encodeMessagePacket(ty, p.Data, useWebSocket)
 	} else {
 		return []byte{byte(p.Type) + '0'}
 	}
@@ -102,15 +100,28 @@ func (p Packet) Encode() []byte {
 	return nil
 }
 
-func encodeMessagePacket(ty MessageType, data []byte) []byte {
-	var packetType byte
-	if ty == MessageTypeText {
-		packetType = byte(PacketTypeMessage) + '0'
-	} else if ty == MessageTypeBinary {
-		packetType = 'b'
+func encodeMessagePacket(ty MessageType, data []byte, useWebSocket bool) []byte {
+	if !useWebSocket {
+		var (
+			packetType  byte
+			encodedData []byte
+		)
+		if ty == MessageTypeText {
+			packetType = byte(PacketTypeMessage) + '0'
+			encodedData = data
+		} else if ty == MessageTypeBinary {
+			packetType = 'b'
+			encodedData = []byte(base64.StdEncoding.EncodeToString(data))
+		}
+		f := []byte{packetType}
+		return append(f, encodedData...)
+	} else {
+		f := append([]byte{}, data...)
+		if ty == MessageTypeText {
+			f = append([]byte{'4'}, f...)
+		}
+		return f
 	}
-	f := []byte{packetType}
-	return append(f, data...)
 }
 
 func encodePayload(packetStrs [][]byte) []byte {

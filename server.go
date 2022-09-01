@@ -89,6 +89,7 @@ type ServerSocket struct {
 	pongCanceler context.CancelFunc
 
 	transport string
+	ws        *websocket.Conn
 }
 
 func (ss *ServerSocket) SetOnMessageHandler(handler OnMessageHandler) {
@@ -218,9 +219,6 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 		pingInterval: pingInterval,
 		pongTimeout:  time.Duration(s.Config.PingTimeout) * time.Millisecond,
 	}
-	s.socketsLock.Lock()
-	s.sockets[sid] = ss
-	s.socketsLock.Unlock()
 
 	// response
 	if transport == TRANSPORT_POLLING {
@@ -246,6 +244,10 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 
 		// ping thread
 		go s.pingFunc(ss)
+
+		s.socketsLock.Lock()
+		s.sockets[sid] = ss
+		s.socketsLock.Unlock()
 	} else if transport == TRANSPORT_WEBSOCKET {
 		c, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -253,7 +255,6 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		defer c.Close()
 
 		response := openPacketResponse{
 			Sid: sid,
@@ -281,13 +282,32 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 		// ping thread
 		go s.pingFunc(ss)
 
-		for {
-			_, _, err := c.ReadMessage()
-			if err != nil {
-				log.Println("read:", err)
-				break
+		ss.ws = c
+
+		s.socketsLock.Lock()
+		s.sockets[sid] = ss
+		s.socketsLock.Unlock()
+
+		go s.messageInWsWorker(ss)
+
+		go func() {
+			for {
+				ty, b, err := c.ReadMessage()
+				if err != nil {
+					log.Println("read:", err)
+					s.DropConnection(ss, cancelReasonBadRequest)
+					return
+				}
+
+				isBinary := ty == websocket.BinaryMessage
+				ok, reason := s.messageOutProcess(b, ss, false, isBinary)
+				if !ok {
+					log.Printf("websocket messageOutProcess: %v", reason)
+					s.DropConnection(ss, reason)
+					return
+				}
 			}
-		}
+		}()
 	}
 }
 
@@ -336,7 +356,7 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 
 	packets := make([][]byte, len(msgs))
 	for i, msg := range msgs {
-		packets[i] = msg.Encode()
+		packets[i] = msg.Encode(false)
 	}
 
 	payload := encodePayload(packets)
@@ -348,6 +368,34 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 	w.Write(payload)
 
 	ss.isPollingNow = false
+}
+
+func (s *Server) messageInWsWorker(ss *ServerSocket) {
+	for {
+		msgs, cancelReason := ss.WaitForMessage()
+		if cancelReason != nil {
+			log.Printf("websocket WaitForMessage canceled: reason: %v", *cancelReason)
+			return
+		}
+
+		type packetBin struct {
+			messageType int
+			data        []byte
+		}
+		packets := make([]packetBin, len(msgs))
+		for i, msg := range msgs {
+			packets[i].data = msg.Encode(true)
+			if msg.IsBinary {
+				packets[i].messageType = websocket.BinaryMessage
+			} else {
+				packets[i].messageType = websocket.TextMessage
+			}
+		}
+
+		for _, packet := range packets {
+			ss.ws.WriteMessage(packet.messageType, packet.data)
+		}
+	}
 }
 
 func (s *Server) messageOut(w http.ResponseWriter, r *http.Request, transport string, sid string) {
@@ -376,14 +424,36 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 		return
 	}
 
+	ok, reason := s.messageOutProcess(body, ss, true, false)
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		s.DropConnection(ss, reason)
+		return
+	}
+
+	w.Write([]byte("ok"))
+}
+
+func (s *Server) messageOutProcess(body []byte, ss *ServerSocket, usePayload bool, isBinaryWebSocket bool) (bool, cancelReason) {
 	// log.Printf("before parse Payload, body: %v", body)
 
-	packets, err := parsePayload(body)
-	if err != nil {
-		log.Printf("parsePayload error: %v", err)
-		w.WriteHeader(http.StatusBadRequest)
-		s.DropConnection(ss, cancelReasonBadRequest)
-		return
+	var packets []Packet
+	if usePayload {
+		var err error
+		packets, err = parsePayload(body)
+		if err != nil {
+			log.Printf("parsePayload error: %v", err)
+			s.DropConnection(ss, cancelReasonBadRequest)
+			return false, cancelReasonBadRequest
+		}
+	} else {
+		packet, err := parsePacket(body, isBinaryWebSocket)
+		if err != nil {
+			log.Printf("parsePacket error: %v", err)
+			s.DropConnection(ss, cancelReasonBadRequest)
+			return false, cancelReasonBadRequest
+		}
+		packets = []Packet{packet}
 	}
 
 	// log.Printf("before validation, packets: %v", packets)
@@ -393,8 +463,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	for _, packet := range packets {
 		// handle close
 		if packet.Type == PacketTypeClose {
-			s.DropConnection(ss, cancelReasonCloseRequested)
-			return
+			return false, cancelReasonCloseRequested
 		}
 
 		// handle pong
@@ -406,9 +475,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 
 		if packet.Type != PacketTypeMessage {
 			log.Printf("invalid packet type: %v", packet.Type)
-			w.WriteHeader(http.StatusBadRequest)
-			s.DropConnection(ss, cancelReasonBadRequest)
-			return
+			return false, cancelReasonBadRequest
 		}
 
 		msgPackets = append(msgPackets, packet)
@@ -434,12 +501,19 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 
 	// log.Println("before response")
 
-	w.Write([]byte("ok"))
+	// w.Write([]byte("ok"))
+	return true, 0
 }
 
 func (s *Server) DropConnection(ss *ServerSocket, reason cancelReason) {
 	ss.cancelReason = reason
 	ss.canceler()
+
+	if ss.ws != nil {
+		if err := ss.ws.Close(); err != nil {
+			log.Printf("websocket close error: %v", err)
+		}
+	}
 
 	s.socketsLock.Lock()
 	delete(s.sockets, ss.sid)
