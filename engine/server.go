@@ -212,6 +212,32 @@ func (s *Server) EngineIOHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) HandShake(w http.ResponseWriter, r *http.Request, transport string, eio string) {
+	if eio != "4" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	if transport != TRANSPORT_POLLING && transport != TRANSPORT_WEBSOCKET {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	s.handShake(w, r, transport)
+}
+
+func (s *Server) WebSocketUpgrade(w http.ResponseWriter, r *http.Request, sid string) {
+	s.webSocketUpgrade(w, r, sid)
+}
+
+func (s *Server) MessageOut(w http.ResponseWriter, r *http.Request, sid string) {
+	s.messageOut(w, r, sid)
+}
+
+func (s *Server) MessageIn(w http.ResponseWriter, r *http.Request, sid string) {
+	s.messageIn(w, r, sid)
+}
+
 func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport string) {
 	// generate sid
 	var sid string
