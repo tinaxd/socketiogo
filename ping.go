@@ -1,6 +1,14 @@
 package main
 
-func (ss *ServerSocket) PingFunc() {
+import (
+	"context"
+	"log"
+	"time"
+)
+
+func (s *Server) pingFunc(ss *ServerSocket) {
+	log.Printf("ping timer started")
+	ss.pingTimer = time.NewTimer(ss.pingInterval)
 	select {
 	case <-ss.ctx.Done():
 		return
@@ -8,10 +16,33 @@ func (ss *ServerSocket) PingFunc() {
 	}
 
 	ss.sendPing()
+	go s.waitForPong(ss)
 }
 
 func (ss *ServerSocket) sendPing() {
+	log.Printf("send ping")
 	ss.sendPacket(Packet{
 		Type: PacketTypePing,
 	})
+}
+
+func (s *Server) handlePong(ss *ServerSocket) {
+	log.Printf("handling pong pong")
+	ss.pongCanceler()
+	go s.pingFunc(ss)
+}
+
+func (s *Server) waitForPong(ss *ServerSocket) {
+	ss.pongTimer = time.NewTimer(ss.pongTimeout)
+	ss.pongCtx, ss.pongCanceler = context.WithCancel(ss.ctx)
+
+	select {
+	case <-ss.pongCtx.Done():
+		log.Println("waitForPong: context done")
+		ss.pongTimer.Stop()
+		return
+	case <-ss.pongTimer.C:
+		log.Printf("pong timeout")
+		s.DropConnection(ss, cancelReasonNoPong)
+	}
 }

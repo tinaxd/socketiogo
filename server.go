@@ -65,6 +65,7 @@ type cancelReason int
 const (
 	cancelReasonBadRequest cancelReason = iota
 	cancelReasonDoublePolling
+	cancelReasonNoPong
 )
 
 type ServerSocket struct {
@@ -79,7 +80,13 @@ type ServerSocket struct {
 
 	isPollingNow bool
 
-	pingTimer time.Ticker
+	pingTimer    *time.Timer
+	pingInterval time.Duration
+	pongTimer    *time.Timer
+	pongTimeout  time.Duration
+	pongCtx      context.Context
+	pongCanceler context.CancelFunc
+
 	transport string
 }
 
@@ -199,14 +206,16 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 	}
 
 	// register ServerSocket
+	pingInterval := time.Duration(s.Config.PingInterval) * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	ss := &ServerSocket{
 		sid:          sid,
 		messageQueue: make(chan Packet, 100),
 		ctx:          ctx,
 		canceler:     cancel,
-		pingTimer:    *time.NewTicker(time.Duration(s.Config.PingInterval) * time.Millisecond),
 		transport:    transport,
+		pingInterval: pingInterval,
+		pongTimeout:  time.Duration(s.Config.PingTimeout) * time.Millisecond,
 	}
 	s.socketsLock.Lock()
 	s.sockets[sid] = ss
@@ -235,7 +244,7 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 		}
 
 		// ping thread
-		go ss.PingFunc()
+		go s.pingFunc(ss)
 	} else if transport == TRANSPORT_WEBSOCKET {
 		c, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -269,7 +278,7 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 		}
 
 		// ping thread
-		go ss.PingFunc()
+		go s.pingFunc(ss)
 
 		for {
 			_, _, err := c.ReadMessage()
@@ -310,6 +319,7 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 	log.Printf("messageInPolling: WaitForMessage")
 	msgs, cancelReason := ss.WaitForMessage()
 	if cancelReason != nil {
+		log.Printf("WaitForMessage canceled: reason: %v", *cancelReason)
 		graceful := *cancelReason == cancelReasonDoublePolling
 		if graceful {
 			w.Write(encodeClosePacket())
@@ -357,7 +367,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	// log.Println("messageOutPolling")
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Print(err)
+		log.Printf("messageOutPolling: read body error: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		s.DropConnection(ss, cancelReasonBadRequest)
 		return
@@ -367,6 +377,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 
 	packets, err := parsePayload(body)
 	if err != nil {
+		log.Printf("parsePayload error: %v", err)
 		w.WriteHeader(http.StatusBadRequest)
 		s.DropConnection(ss, cancelReasonBadRequest)
 		return
@@ -375,19 +386,30 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	// log.Printf("before validation, packets: %v", packets)
 
 	// validation
+	msgPackets := make([]Packet, 0, len(packets))
 	for _, packet := range packets {
+		// handle pong
+		if packet.Type == PacketTypePong {
+			log.Printf("received pong")
+			s.handlePong(ss)
+			continue
+		}
+
 		if packet.Type != PacketTypeMessage {
+			log.Printf("invalid packet type: %v", packet.Type)
 			w.WriteHeader(http.StatusBadRequest)
 			s.DropConnection(ss, cancelReasonBadRequest)
 			return
 		}
+
+		msgPackets = append(msgPackets, packet)
 	}
 
 	// log.Println("before callback")
 
 	// callbacks
 	if ss.onMessageHandler != nil {
-		for _, packet := range packets {
+		for _, packet := range msgPackets {
 			var ty MessageType
 			if packet.IsBinary {
 				ty = MessageTypeBinary
