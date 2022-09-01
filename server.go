@@ -66,6 +66,7 @@ const (
 	cancelReasonBadRequest cancelReason = iota
 	cancelReasonDoublePolling
 	cancelReasonNoPong
+	cancelReasonCloseRequested
 )
 
 type ServerSocket struct {
@@ -320,9 +321,11 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 	msgs, cancelReason := ss.WaitForMessage()
 	if cancelReason != nil {
 		log.Printf("WaitForMessage canceled: reason: %v", *cancelReason)
-		graceful := *cancelReason == cancelReasonDoublePolling
-		if graceful {
+		if *cancelReason == cancelReasonDoublePolling {
 			w.Write(encodeClosePacket())
+			return
+		} else if *cancelReason == cancelReasonCloseRequested {
+			w.Write(encodeNoopPacket())
 			return
 		} else {
 			w.WriteHeader(http.StatusBadRequest)
@@ -388,6 +391,12 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	// validation
 	msgPackets := make([]Packet, 0, len(packets))
 	for _, packet := range packets {
+		// handle close
+		if packet.Type == PacketTypeClose {
+			s.DropConnection(ss, cancelReasonCloseRequested)
+			return
+		}
+
 		// handle pong
 		if packet.Type == PacketTypePong {
 			log.Printf("received pong")

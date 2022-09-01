@@ -109,3 +109,7 @@ func encodePayload(packetStrs [][]byte) []byte {
 func encodeClosePacket() []byte {
 	return []byte{byte(PacketTypeClose) + '0'}
 }
+
+func encodeNoopPacket() []byte {
+	return []byte{byte(PacketTypeNoop) + '0'}
+}
