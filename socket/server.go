@@ -1,13 +1,12 @@
 package socket
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"log"
-	"math/big"
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"github.com/tinaxd/socketiogo/engine"
@@ -47,6 +46,8 @@ type Server struct {
 
 	namespaces     map[string]*Namespace // nsp -> namespace
 	namespacesLock sync.Mutex
+
+	nextAckId int32
 }
 
 func (s *Server) Namespace(nsp string) *Namespace {
@@ -130,12 +131,14 @@ func (ss *ServerSocket) Emit(event string, args []interface{}) error {
 
 type AckCallback func(args interface{})
 
+func (s *Server) generateAckId() int {
+	n := atomic.AddInt32(&s.nextAckId, 1)
+	return int(n)
+}
+
 func (ss *ServerSocket) EmitWithAck(event string, args []interface{}, cb AckCallback) error {
-	n, err := rand.Int(rand.Reader, big.NewInt(1e6))
-	if err != nil {
-		return err
-	}
-	ackId := int(n.Int64())
+	n := ss.s.generateAckId()
+	ackId := int(n)
 	return ss.send(NewPacket(PacketTypeEvent, 0, ss.namespace, []interface{}{event, args}, &ackId))
 }
 
@@ -152,6 +155,7 @@ func NewServer() *Server {
 		esidMap:    make(map[string]*ServerSocket),
 		sockets:    make(map[string]*ServerSocket),
 		namespaces: make(map[string]*Namespace),
+		nextAckId:  0,
 	}
 
 	eio.SetOnConnectionHandler(func(ess *engine.ServerSocket) {
@@ -189,9 +193,11 @@ func (s *Server) addServerSocket(ess *engine.ServerSocket) (*ServerSocket, error
 	}
 
 	ss := &ServerSocket{
-		s:            s,
-		sid:          sid,
-		engineSocket: ess,
+		s:             s,
+		sid:           sid,
+		engineSocket:  ess,
+		eventHandlers: make(map[string]EventHandler),
+		namespace:     "/",
 	}
 
 	s.socketsLock.Lock()
@@ -224,10 +230,16 @@ func (s *Server) messageHandler(ss *ServerSocket, msg engine.Message) {
 
 func (s *Server) handleConnect(ss *ServerSocket, p Packet) {
 	nsp := p.Namespace
-	s.connectNamespace(ss, nsp)
+	success := s.connectNamespace(ss, nsp)
+	log.Printf("nsp: %v, success: %v", nsp, success)
+
+	if !success {
+		ss.send(createConnectNamespaceFailure(nsp, "Invalid namespace"))
+		return
+	}
 
 	// send connect packet
-	s.send(ss, createConnectNamespace(nsp, ss.sid))
+	ss.send(createConnectNamespace(nsp, ss.sid))
 
 	// callback
 	s.namespacesLock.Lock()
@@ -252,13 +264,14 @@ func (s *Server) handleEvent(ss *ServerSocket, p Packet) {
 		panic("payload is already decoded (unreachable)")
 	}
 
-	var decoded []interface{}
-	if err := json.Unmarshal(p.Payload.([]byte), &decoded); err != nil {
+	var decodedI []interface{}
+	if err := json.Unmarshal(p.Payload.([]byte), &decodedI); err != nil {
 		log.Println(err)
 		s.DropConnection(ss)
 		return
 	}
 
+	decoded := decodedI
 	if len(decoded) < 1 {
 		log.Println("handleEvent: invalid payload")
 		s.DropConnection(ss)
@@ -311,18 +324,19 @@ func (ss *ServerSocket) send(p Packet) error {
 	return ss.s.send(ss, p)
 }
 
-func (s *Server) connectNamespace(ss *ServerSocket, nsp string) {
+func (s *Server) connectNamespace(ss *ServerSocket, nsp string) bool {
+	s.namespacesLock.Lock()
+	ns, ok := s.namespaces[nsp]
+	s.namespacesLock.Unlock()
+
+	if !ok {
+		return false
+	}
+
+	log.Printf("connecting to " + nsp)
 	if ss.joined {
 		s.disconnectFromNamespace(ss, ss.namespace)
 	}
-
-	s.namespacesLock.Lock()
-	ns, ok := s.namespaces[nsp]
-	if !ok {
-		ns = NewNamespace(nsp)
-		s.namespaces[nsp] = ns
-	}
-	s.namespacesLock.Unlock()
 
 	ns.socketsLock.Lock()
 	ns.sockets[ss.sid] = ss
@@ -330,6 +344,7 @@ func (s *Server) connectNamespace(ss *ServerSocket, nsp string) {
 
 	ss.namespace = nsp
 	ss.joined = true
+	return true
 }
 
 func (s *Server) disconnectFromNamespace(ss *ServerSocket, nsp string) {
@@ -346,7 +361,7 @@ func (s *Server) disconnectFromNamespace(ss *ServerSocket, nsp string) {
 	ns.socketsLock.Unlock()
 
 	ss.joined = false
-	ss.namespace = ""
+	ss.namespace = "/"
 }
 
 func (s *Server) DropConnection(ss *ServerSocket) {

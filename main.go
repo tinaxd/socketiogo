@@ -19,18 +19,19 @@ func main() {
 	// }()
 
 	type auth struct {
-		Auth interface{} `json:"auth"`
+		Auth interface{} `json:"token"`
 	}
 
 	s.Namespace("/").SetOnConnectionHandler(func(ss *sio.ServerSocket, handshake []byte) {
+		log.Print("/ handshake string: " + string(handshake))
 		var a auth
-		if err := json.Unmarshal(handshake, &a); err != nil {
-			log.Println("error unmarshaling handshake:", err)
-			return
+		if err := json.Unmarshal(handshake, &a); err == nil {
+			ss.Emit("auth", []interface{}{
+				a,
+			})
+		} else {
+			ss.Emit("auth", []interface{}{map[string]interface{}{}})
 		}
-		ss.Emit("auth", []interface{}{
-			a.Auth,
-		})
 
 		ss.SetEventHandler("message", sio.CreateEventHandler(func(ev *sio.Message) {
 			if err := ss.Emit("message-back", ev.Args); err != nil {
@@ -46,14 +47,15 @@ func main() {
 	})
 
 	s.Namespace("/custom").SetOnConnectionHandler(func(ss *sio.ServerSocket, handshake []byte) {
+		log.Print("/custom handshake string: " + string(handshake))
 		var a auth
-		if err := json.Unmarshal(handshake, &a); err != nil {
-			log.Println("error unmarshaling handshake:", err)
-			return
+		if err := json.Unmarshal(handshake, &a); err == nil {
+			ss.Emit("auth", []interface{}{
+				a,
+			})
+		} else {
+			ss.Emit("auth", []interface{}{map[string]interface{}{}})
 		}
-		ss.Emit("auth", []interface{}{
-			a.Auth,
-		})
 	})
 
 	http.HandleFunc("/socket.io/", s.HandleFunc)

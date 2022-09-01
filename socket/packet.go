@@ -101,9 +101,16 @@ func parsePacket(b []byte, decodePayload bool) (Packet, error) {
 		payload interface{}
 	)
 
+	const (
+		PosBin = iota
+		PosNsp
+		PosAckId
+	)
+
 	payloadStart := false
 	var buf bytes.Buffer
 	i := 1
+	j := PosBin
 	for !payloadStart && i < len(b) {
 		// binary attachments
 		if b[i] == '-' {
@@ -116,6 +123,8 @@ func parsePacket(b []byte, decodePayload bool) (Packet, error) {
 				}
 			}
 			buf.Reset()
+			i++
+			j = PosNsp
 			continue
 		}
 
@@ -126,6 +135,8 @@ func parsePacket(b []byte, decodePayload bool) (Packet, error) {
 				nsp = bufs
 			}
 			buf.Reset()
+			i++
+			j = PosAckId
 			continue
 		}
 
@@ -142,11 +153,40 @@ func parsePacket(b []byte, decodePayload bool) (Packet, error) {
 			}
 			buf.Reset()
 			payloadStart = true
+			break
+		}
+
+		if b[i] == '/' {
+			buf.Reset()
+			buf.WriteByte(b[i])
+			i++
+			j = PosNsp
 			continue
 		}
 
 		buf.WriteByte(b[i])
 		i++
+	}
+
+	bufs := buf.String()
+	if bufs != "" {
+		switch j {
+		case PosBin:
+			var err error
+			bin, err = strconv.Atoi(bufs)
+			if err != nil {
+				return Packet{}, err
+			}
+		case PosNsp:
+			nsp = bufs
+		case PosAckId:
+			var err error
+			ackId = new(int)
+			*ackId, err = strconv.Atoi(bufs)
+			if err != nil {
+				return Packet{}, err
+			}
+		}
 	}
 
 	payloadStr := b[i:]
@@ -172,6 +212,14 @@ type connectNamespaceSuccess struct {
 	Sid string `json:"sid"`
 }
 
+type connectNamespaceFailure struct {
+	Message string `json:"message"`
+}
+
 func createConnectNamespace(nsp string, sid string) Packet {
 	return NewPacket(PacketTypeConnect, 0, nsp, connectNamespaceSuccess{Sid: sid}, nil)
+}
+
+func createConnectNamespaceFailure(nsp string, message string) Packet {
+	return NewPacket(PacketTypeConnectError, 0, nsp, connectNamespaceFailure{Message: message}, nil)
 }
