@@ -3,7 +3,6 @@ package main
 import (
 	"log"
 	"net/http"
-	"time"
 )
 
 func main() {
@@ -21,12 +20,12 @@ func main() {
 		})
 	})
 
-	dumper := time.NewTicker(2 * time.Second)
-	go func() {
-		for range dumper.C {
-			s.debugDump()
-		}
-	}()
+	// dumper := time.NewTicker(2 * time.Second)
+	// go func() {
+	// 	for range dumper.C {
+	// 		s.debugDump()
+	// 	}
+	// }()
 
 	http.HandleFunc("/engine.io/", s.engineIOHandler)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
