@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -151,7 +150,7 @@ LOOP:
 }
 
 func (ss *ServerSocket) Send(ty MessageType, data []byte) {
-	log.Printf("queued data: %v", data)
+	//log.Printf("queued data: %v", data)
 	packet := Packet{
 		Type:     PacketTypeMessage,
 		Data:     data,
@@ -160,7 +159,7 @@ func (ss *ServerSocket) Send(ty MessageType, data []byte) {
 	select {
 	case ss.messageQueue <- packet:
 	case <-ss.ctx.Done():
-		log.Println("Send: context done")
+		//log.Println("Send: context done")
 	}
 }
 
@@ -168,13 +167,13 @@ func (ss *ServerSocket) sendPacket(p Packet) {
 	select {
 	case ss.messageQueue <- p:
 	case <-ss.ctx.Done():
-		log.Println("sendPacket: context done")
+		//log.Println("sendPacket: context done")
 	}
 }
 
 func (s *Server) engineIOHandler(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
-	// log.Println(v)
+	// //log.Println(v)
 
 	eio := v.Get("EIO")
 	if eio != "4" {
@@ -277,7 +276,7 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 	} else if transport == TRANSPORT_WEBSOCKET {
 		c, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			log.Print("upgrade:", err)
+			//log.Print("upgrade:", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -324,7 +323,7 @@ func (s *Server) startWebSocketConnection(ss *ServerSocket, c *websocket.Conn, s
 		for {
 			ty, b, err := c.ReadMessage()
 			if err != nil {
-				log.Println("read:", err)
+				//log.Println("read:", err)
 				s.DropConnection(ss, cancelReasonBadRequest)
 				return
 			}
@@ -332,7 +331,7 @@ func (s *Server) startWebSocketConnection(ss *ServerSocket, c *websocket.Conn, s
 			isBinary := ty == websocket.BinaryMessage
 			ok, reason := s.messageOutProcess(b, ss, false, isBinary)
 			if !ok {
-				log.Printf("websocket messageOutProcess: %v", reason)
+				//log.Printf("websocket messageOutProcess: %v", reason)
 				s.DropConnection(ss, reason)
 				return
 			}
@@ -341,10 +340,10 @@ func (s *Server) startWebSocketConnection(ss *ServerSocket, c *websocket.Conn, s
 }
 
 func (s *Server) webSocketUpgrade(w http.ResponseWriter, r *http.Request, sid string) {
-	log.Printf("http upgrade request")
+	//log.Printf("http upgrade request")
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Print("upgrade:", err)
+		//log.Print("upgrade:", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -373,11 +372,11 @@ func (s *Server) webSocketUpgrade(w http.ResponseWriter, r *http.Request, sid st
 	ss.isUpgrading = true
 	ss.upgradeCtx, ss.upgradeCanceler = context.WithCancel(ss.ctx)
 	go func() {
-		log.Println("upgrade timeout timer started")
+		//log.Println("upgrade timeout timer started")
 		// if "upgrade" packet is not received in UpgradeTimeout seconds, cancel upgrade
 		select {
 		case <-ss.upgradeCtx.Done():
-			log.Println("upgrade timeout timer canceled")
+			//log.Println("upgrade timeout timer canceled")
 			return
 		case <-time.After(UpgradeTimeout):
 			if ss.ws != nil {
@@ -410,7 +409,7 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 	}
 
 	if ss.isPollingNow {
-		log.Println("messageInPolling: already polling")
+		//log.Println("messageInPolling: already polling")
 		w.WriteHeader(http.StatusInternalServerError)
 		s.DropConnection(ss, cancelReasonDoublePolling)
 		return
@@ -418,10 +417,10 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 
 	ss.isPollingNow = true
 
-	log.Printf("messageInPolling: WaitForMessage")
+	//log.Printf("messageInPolling: WaitForMessage")
 	msgs, cancelReason := ss.WaitForMessage(5 * time.Second)
 	if cancelReason != nil {
-		log.Printf("WaitForMessage canceled: reason: %v", *cancelReason)
+		//log.Printf("WaitForMessage canceled: reason: %v", *cancelReason)
 		if *cancelReason == cancelReasonDoublePolling {
 			w.Write(encodeClosePacket())
 			return
@@ -436,7 +435,7 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 			return
 		}
 	}
-	log.Printf("messageInPolling: WaitForMessage done")
+	//log.Printf("messageInPolling: WaitForMessage done")
 
 	packets := make([][]byte, len(msgs))
 	for i, msg := range msgs {
@@ -445,7 +444,7 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 
 	payload := encodePayload(packets)
 
-	log.Printf("messageInPolling payload: %v", string(payload))
+	//log.Printf("messageInPolling payload: %v", string(payload))
 
 	w.Header().Set("Content-Type", "text/plain")
 	w.Header().Set("charset", "UTF-8")
@@ -458,7 +457,7 @@ func (s *Server) messageInWsWorker(ss *ServerSocket) {
 	for {
 		msgs, cancelReason := ss.WaitForMessage(0)
 		if cancelReason != nil {
-			log.Printf("websocket WaitForMessage canceled: reason: %v", *cancelReason)
+			//log.Printf("websocket WaitForMessage canceled: reason: %v", *cancelReason)
 			return
 		}
 
@@ -495,10 +494,10 @@ func (s *Server) messageOut(w http.ResponseWriter, r *http.Request, sid string) 
 }
 
 func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *ServerSocket) {
-	// log.Println("messageOutPolling")
+	// //log.Println("messageOutPolling")
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("messageOutPolling: read body error: %v", err)
+		//log.Printf("messageOutPolling: read body error: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		s.DropConnection(ss, cancelReasonBadRequest)
 		return
@@ -506,7 +505,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 
 	ok, reason := s.messageOutProcess(body, ss, true, false)
 	if !ok {
-		log.Printf("messageOutPolling: messageOutProcess: %v", reason)
+		//log.Printf("messageOutPolling: messageOutProcess: %v", reason)
 		w.WriteHeader(http.StatusBadRequest)
 		s.DropConnection(ss, reason)
 		return
@@ -516,28 +515,28 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 }
 
 func (s *Server) messageOutProcess(body []byte, ss *ServerSocket, usePayload bool, isBinaryWebSocket bool) (bool, cancelReason) {
-	// log.Printf("before parse Payload, body: %v", body)
+	// //log.Printf("before parse Payload, body: %v", body)
 
 	var packets []Packet
 	if usePayload {
 		var err error
 		packets, err = parsePayload(body)
 		if err != nil {
-			log.Printf("parsePayload error: %v", err)
+			//log.Printf("parsePayload error: %v", err)
 			s.DropConnection(ss, cancelReasonBadRequest)
 			return false, cancelReasonBadRequest
 		}
 	} else {
 		packet, err := parsePacket(body, isBinaryWebSocket)
 		if err != nil {
-			log.Printf("parsePacket error: %v", err)
+			//log.Printf("parsePacket error: %v", err)
 			s.DropConnection(ss, cancelReasonBadRequest)
 			return false, cancelReasonBadRequest
 		}
 		packets = []Packet{packet}
 	}
 
-	// log.Printf("before validation, packets: %v", packets)
+	// //log.Printf("before validation, packets: %v", packets)
 
 	// validation
 	msgPackets := make([]Packet, 0, len(packets))
@@ -549,14 +548,14 @@ func (s *Server) messageOutProcess(body []byte, ss *ServerSocket, usePayload boo
 
 		// handle pong
 		if packet.Type == PacketTypePong {
-			log.Printf("received pong")
+			//log.Printf("received pong")
 			s.handlePong(ss)
 			continue
 		}
 
 		// handle ping
 		if packet.Type == PacketTypePing && bytes.Equal(packet.Data, []byte("probe")) {
-			log.Printf("received upgrade request")
+			//log.Printf("received upgrade request")
 			ss.sendPacket(Packet{
 				Type: PacketTypePong,
 				Data: []byte("probe"),
@@ -566,7 +565,7 @@ func (s *Server) messageOutProcess(body []byte, ss *ServerSocket, usePayload boo
 
 		// handle upgrade
 		if packet.Type == PacketTypeUpgrade {
-			log.Printf("received upgrade request")
+			//log.Printf("received upgrade request")
 			ss.transport = TRANSPORT_WEBSOCKET
 			ss.isUpgrading = false
 			ss.upgradeCanceler()
@@ -574,14 +573,14 @@ func (s *Server) messageOutProcess(body []byte, ss *ServerSocket, usePayload boo
 		}
 
 		if packet.Type != PacketTypeMessage {
-			log.Printf("invalid packet type: %v", packet.Type)
+			//log.Printf("invalid packet type: %v", packet.Type)
 			return false, cancelReasonBadRequest
 		}
 
 		msgPackets = append(msgPackets, packet)
 	}
 
-	// log.Println("before callback")
+	// //log.Println("before callback")
 
 	// callbacks
 	if ss.onMessageHandler != nil {
@@ -599,7 +598,7 @@ func (s *Server) messageOutProcess(body []byte, ss *ServerSocket, usePayload boo
 		}
 	}
 
-	// log.Println("before response")
+	// //log.Println("before response")
 
 	// w.Write([]byte("ok"))
 	return true, 0
@@ -611,7 +610,7 @@ func (s *Server) DropConnection(ss *ServerSocket, reason cancelReason) {
 
 	if ss.ws != nil {
 		if err := ss.ws.Close(); err != nil {
-			log.Printf("websocket close error: %v", err)
+			//log.Printf("websocket close error: %v", err)
 		}
 		ss.ws = nil
 	}
