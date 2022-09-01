@@ -320,8 +320,17 @@ func (s *Server) send(ss *ServerSocket, p Packet) error {
 	return nil
 }
 
+func (s *Server) sendBinary(ss *ServerSocket, data []byte) error {
+	ss.engineSocket.Send(engine.MessageTypeBinary, data)
+	return nil
+}
+
 func (ss *ServerSocket) send(p Packet) error {
 	return ss.s.send(ss, p)
+}
+
+func (ss *ServerSocket) sendBinary(data []byte) error {
+	return ss.s.sendBinary(ss, data)
 }
 
 func (s *Server) connectNamespace(ss *ServerSocket, nsp string) bool {
