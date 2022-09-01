@@ -14,9 +14,9 @@ func main() {
 	})
 
 	s.SetOnConnectionHandler(func(ss *ServerSocket) {
-		ss.SetOnMessageHandler(func(data []byte) {
+		ss.SetOnMessageHandler(func(data Message) {
 			log.Printf("Received message: %v\n", data)
-			ss.Send(MessageTypeText, data)
+			ss.Send(data.Type, data.Data)
 		})
 	})
 

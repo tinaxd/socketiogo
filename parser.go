@@ -26,8 +26,9 @@ const (
 const ()
 
 type Packet struct {
-	Type PacketType
-	Data []byte
+	Type     PacketType
+	Data     []byte
+	IsBinary bool
 }
 
 func sliceSplit(s []byte, sep byte) [][]byte {
@@ -48,9 +49,14 @@ func parsePacket(packetStr []byte) (Packet, error) {
 		return Packet{}, errors.New("invalid packet format")
 	}
 
-	packetType := PacketType(packetStr[0] - '0')
-	packetData := packetStr[1:]
-	return Packet{Type: packetType, Data: packetData}, nil
+	if packetStr[0] == 'b' {
+		packetData := packetStr[1:]
+		return Packet{Type: PacketTypeMessage, Data: packetData, IsBinary: true}, nil
+	} else {
+		packetType := PacketType(packetStr[0] - '0')
+		packetData := packetStr[1:]
+		return Packet{Type: packetType, Data: packetData, IsBinary: false}, nil
+	}
 }
 
 func parsePayload(payloadStr []byte) ([]Packet, error) {
@@ -68,8 +74,14 @@ func parsePayload(payloadStr []byte) ([]Packet, error) {
 	return packets, nil
 }
 
-func encodeMessagePacket(data []byte) []byte {
-	f := []byte{byte(PacketTypeMessage) + '0'}
+func encodeMessagePacket(ty MessageType, data []byte) []byte {
+	var packetType byte
+	if ty == MessageTypeText {
+		packetType = byte(PacketTypeMessage) + '0'
+	} else if ty == MessageTypeBinary {
+		packetType = 'b'
+	}
+	f := []byte{packetType}
 	return append(f, data...)
 }
 

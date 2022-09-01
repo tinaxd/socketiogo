@@ -49,12 +49,17 @@ type openPacketResponse struct {
 	ServerConfig
 }
 
-type OnMessageHandler func(data []byte)
+type Message struct {
+	Type MessageType
+	Data []byte
+}
+
+type OnMessageHandler func(data Message)
 
 type ServerSocket struct {
 	sid              string
 	onMessageHandler OnMessageHandler
-	messageQueue     chan []byte
+	messageQueue     chan Message
 }
 
 func (ss *ServerSocket) SetOnMessageHandler(handler OnMessageHandler) {
@@ -65,10 +70,10 @@ func (ss *ServerSocket) Sid() string {
 	return ss.sid
 }
 
-func (ss *ServerSocket) WaitForMessage() [][]byte {
+func (ss *ServerSocket) WaitForMessage() []Message {
 	// wait for the first message
 	firstMsg := <-ss.messageQueue
-	msgs := [][]byte{firstMsg}
+	msgs := []Message{firstMsg}
 
 	// add remain messages if exists
 LOOP:
@@ -86,7 +91,7 @@ LOOP:
 
 func (ss *ServerSocket) Send(ty MessageType, data []byte) {
 	log.Printf("queued data: %v", data)
-	ss.messageQueue <- data
+	ss.messageQueue <- Message{Type: ty, Data: data}
 }
 
 func (s *Server) engineIOHandler(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +152,7 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 	// register ServerSocket
 	ss := &ServerSocket{
 		sid:          sid,
-		messageQueue: make(chan []byte, 100),
+		messageQueue: make(chan Message, 100),
 	}
 	s.sockets[sid] = ss
 
@@ -233,7 +238,7 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 
 	packets := make([][]byte, len(msgs))
 	for i, msg := range msgs {
-		packets[i] = encodeMessagePacket(msg)
+		packets[i] = encodeMessagePacket(msg.Type, msg.Data)
 	}
 
 	payload := encodePayload(packets)
@@ -291,7 +296,16 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	// callbacks
 	if ss.onMessageHandler != nil {
 		for _, packet := range packets {
-			ss.onMessageHandler(packet.Data)
+			var ty MessageType
+			if packet.IsBinary {
+				ty = MessageTypeBinary
+			} else {
+				ty = MessageTypeText
+			}
+			ss.onMessageHandler(Message{
+				Type: ty,
+				Data: packet.Data,
+			})
 		}
 	}
 
