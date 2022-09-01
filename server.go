@@ -72,6 +72,7 @@ const (
 	cancelReasonDoublePolling
 	cancelReasonNoPong
 	cancelReasonCloseRequested
+	cancelReasonPollingTimeout
 )
 
 type ServerSocket struct {
@@ -109,14 +110,26 @@ func (ss *ServerSocket) Sid() string {
 	return ss.sid
 }
 
-func (ss *ServerSocket) WaitForMessage() ([]Packet, *cancelReason) {
+func (ss *ServerSocket) WaitForMessage(timeout time.Duration) ([]Packet, *cancelReason) {
 	// wait for the first message
 	var firstMsg Packet
-	select {
-	case firstMsg = <-ss.messageQueue:
-	case <-ss.ctx.Done():
-		reason := ss.cancelReason
-		return nil, &reason
+	if timeout != 0 {
+		select {
+		case firstMsg = <-ss.messageQueue:
+		case <-ss.ctx.Done():
+			reason := ss.cancelReason
+			return nil, &reason
+		case <-time.After(timeout):
+			reason := cancelReasonPollingTimeout
+			return nil, &reason
+		}
+	} else {
+		select {
+		case firstMsg = <-ss.messageQueue:
+		case <-ss.ctx.Done():
+			reason := ss.cancelReason
+			return nil, &reason
+		}
 	}
 	msgs := []Packet{firstMsg}
 
@@ -341,12 +354,14 @@ func (s *Server) webSocketUpgrade(w http.ResponseWriter, r *http.Request, sid st
 	if !ok {
 		s.socketsLock.Unlock()
 		w.WriteHeader(http.StatusBadRequest)
+		s.socketsLock.Unlock()
 		return
 	}
 
 	if ss.ws != nil {
 		// if websocket connection already exists, cancel upgrade
 		c.Close()
+		s.socketsLock.Unlock()
 		return
 	}
 
@@ -389,6 +404,11 @@ func (s *Server) messageIn(w http.ResponseWriter, r *http.Request, sid string) {
 }
 
 func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *ServerSocket) {
+	if ss.transport != TRANSPORT_POLLING {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	if ss.isPollingNow {
 		log.Println("messageInPolling: already polling")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -399,13 +419,16 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 	ss.isPollingNow = true
 
 	log.Printf("messageInPolling: WaitForMessage")
-	msgs, cancelReason := ss.WaitForMessage()
+	msgs, cancelReason := ss.WaitForMessage(5 * time.Second)
 	if cancelReason != nil {
 		log.Printf("WaitForMessage canceled: reason: %v", *cancelReason)
 		if *cancelReason == cancelReasonDoublePolling {
 			w.Write(encodeClosePacket())
 			return
 		} else if *cancelReason == cancelReasonCloseRequested {
+			w.Write(encodeNoopPacket())
+			return
+		} else if *cancelReason == cancelReasonPollingTimeout {
 			w.Write(encodeNoopPacket())
 			return
 		} else {
@@ -433,7 +456,7 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 
 func (s *Server) messageInWsWorker(ss *ServerSocket) {
 	for {
-		msgs, cancelReason := ss.WaitForMessage()
+		msgs, cancelReason := ss.WaitForMessage(0)
 		if cancelReason != nil {
 			log.Printf("websocket WaitForMessage canceled: reason: %v", *cancelReason)
 			return
@@ -596,4 +619,16 @@ func (s *Server) DropConnection(ss *ServerSocket, reason cancelReason) {
 	s.socketsLock.Lock()
 	delete(s.sockets, ss.sid)
 	s.socketsLock.Unlock()
+}
+
+func (s *Server) debugDump() {
+	s.socketsLock.Lock()
+	defer s.socketsLock.Unlock()
+
+	fmt.Println("=== SERVER DUMP ===")
+	for sid, socket := range s.sockets {
+		fmt.Printf("%v\n", sid)
+		fmt.Printf("\t%v\n", socket)
+	}
+
 }
