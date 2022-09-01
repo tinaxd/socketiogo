@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
-	"log"
 )
 
 type PacketType int
@@ -96,8 +95,8 @@ func (p Packet) Encode(useWebSocket bool) []byte {
 	} else {
 		return append([]byte{byte(p.Type) + '0'}, p.Data...)
 	}
-	log.Printf("Packet.Encode: unknown packet type: %v", p.Type)
-	return nil
+	// log.Printf("Packet.Encode: unknown packet type: %v", p.Type)
+	// return nil
 }
 
 func encodeMessagePacket(ty MessageType, data []byte, useWebSocket bool) []byte {
