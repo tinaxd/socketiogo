@@ -343,6 +343,13 @@ func (s *Server) webSocketUpgrade(w http.ResponseWriter, r *http.Request, sid st
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+
+	if ss.ws != nil {
+		// if websocket connection already exists, cancel upgrade
+		c.Close()
+		return
+	}
+
 	ss.ws = c
 	// do not change transport until client sends "upgrade" packet
 	ss.transport = TRANSPORT_POLLING
