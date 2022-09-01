@@ -7,7 +7,10 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 )
+
+var upgrader = websocket.Upgrader{} // use default options
 
 const (
 	TRANSPORT_POLLING   = "polling"
@@ -68,21 +71,55 @@ func (s *Server) engineIOHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := sidUuid.String()
 
-	response := openPacketResponse{
-		Sid:          sid,
-		ServerConfig: s.Config,
-	}
-	responseText, err := json.Marshal(response)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+	if transport == TRANSPORT_POLLING {
+		response := openPacketResponse{
+			Sid:          sid,
+			ServerConfig: s.Config,
+		}
+		responseText, err := json.Marshal(response)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		res := fmt.Sprintf("%d%s", PACKET_TYPE_OPEN, responseText)
 
-	w.Header().Set("Content-Type", "text/plain")
-	w.Header().Set("charset", "UTF-8")
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("charset", "UTF-8")
+		w.Write([]byte(res))
+	} else if transport == TRANSPORT_WEBSOCKET {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Print("upgrade:", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		defer c.Close()
 
-	res := fmt.Sprintf("%d%s", PACKET_TYPE_OPEN, responseText)
-	w.Write([]byte(res))
+		response := openPacketResponse{
+			Sid: sid,
+			ServerConfig: ServerConfig{
+				Upgrades:     []string{},
+				PingInterval: s.Config.PingInterval,
+				PingTimeout:  s.Config.PingTimeout,
+				MaxPayload:   s.Config.MaxPayload,
+			},
+		}
+		responseText, err := json.Marshal(response)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		res := fmt.Sprintf("%d%s", PACKET_TYPE_OPEN, responseText)
+
+		c.WriteMessage(websocket.TextMessage, []byte(res))
+		for {
+			_, _, err := c.ReadMessage()
+			if err != nil {
+				log.Println("read:", err)
+				break
+			}
+		}
+	}
 }
 
 func main() {
