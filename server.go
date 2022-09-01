@@ -171,7 +171,7 @@ func (ss *ServerSocket) sendPacket(p Packet) {
 	}
 }
 
-func (s *Server) engineIOHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) EngineIOHandler(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
 	// //log.Println(v)
 

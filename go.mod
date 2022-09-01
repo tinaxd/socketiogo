@@ -1,4 +1,4 @@
-module github.com/tinaxd/gengine
+module github.com/tinaxd/engineiogo
 
 go 1.18
 

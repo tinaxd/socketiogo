@@ -3,18 +3,20 @@ package main
 import (
 	"log"
 	"net/http"
+
+	eio "github.com/tinaxd/engineiogo"
 )
 
 func main() {
-	s := NewServer(ServerConfig{
-		Upgrades:     []string{TRANSPORT_WEBSOCKET},
+	s := eio.NewServer(eio.ServerConfig{
+		Upgrades:     []string{eio.TRANSPORT_WEBSOCKET},
 		PingInterval: 300,
 		PingTimeout:  200,
 		MaxPayload:   1e6,
 	})
 
-	s.SetOnConnectionHandler(func(ss *ServerSocket) {
-		ss.SetOnMessageHandler(func(data Message) {
+	s.SetOnConnectionHandler(func(ss *eio.ServerSocket) {
+		ss.SetOnMessageHandler(func(data eio.Message) {
 			log.Printf("Received message: %v\n", data)
 			ss.Send(data.Type, data.Data)
 		})
@@ -27,7 +29,7 @@ func main() {
 	// 	}
 	// }()
 
-	http.HandleFunc("/engine.io/", s.engineIOHandler)
+	http.HandleFunc("/engine.io/", s.EngineIOHandler)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Println(r.URL)
 	})
