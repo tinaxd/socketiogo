@@ -646,6 +646,10 @@ func (s *Server) DropConnection(ss *ServerSocket, reason cancelReason) {
 	s.socketsLock.Unlock()
 }
 
+func (s *Server) CloseConnection(ss *ServerSocket) {
+	s.DropConnection(ss, cancelReasonCloseRequested)
+}
+
 func (s *Server) debugDump() {
 	s.socketsLock.Lock()
 	defer s.socketsLock.Unlock()

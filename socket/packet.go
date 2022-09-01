@@ -28,12 +28,12 @@ type Packet struct {
 	AckId              *int
 }
 
-func NewPacket(t PacketType, nBinaryAttachments int, namespace string, payload interface{}, ackId *int) Packet {
+func NewPacket(t PacketType, nBinaryAttachments int, namespace string, jsonSerializablePayload interface{}, ackId *int) Packet {
 	return Packet{
 		Type:               t,
 		NBinaryAttachments: nBinaryAttachments,
 		Namespace:          namespace,
-		Payload:            payload,
+		Payload:            jsonSerializablePayload,
 		payloadIsEncoded:   false,
 		AckId:              ackId,
 	}
@@ -95,8 +95,8 @@ func parsePacket(b []byte, decodePayload bool) (Packet, error) {
 	}
 
 	var (
-		bin     int
-		nsp     string
+		bin     int    = 0
+		nsp     string = "/"
 		ackId   *int
 		payload interface{}
 	)
@@ -107,10 +107,13 @@ func parsePacket(b []byte, decodePayload bool) (Packet, error) {
 	for !payloadStart && i < len(b) {
 		// binary attachments
 		if b[i] == '-' {
-			var err error
-			bin, err = strconv.Atoi(buf.String())
-			if err != nil {
-				return Packet{}, err
+			bufs := buf.String()
+			if bufs != "" {
+				var err error
+				bin, err = strconv.Atoi(bufs)
+				if err != nil {
+					return Packet{}, err
+				}
 			}
 			buf.Reset()
 			continue
@@ -118,18 +121,24 @@ func parsePacket(b []byte, decodePayload bool) (Packet, error) {
 
 		// namespace
 		if b[i] == ',' {
-			nsp = buf.String()
+			bufs := buf.String()
+			if bufs != "" {
+				nsp = bufs
+			}
 			buf.Reset()
 			continue
 		}
 
 		// ackid
 		if b[i] == '{' || b[i] == '[' {
-			var err error
-			ackId = new(int)
-			*ackId, err = strconv.Atoi(buf.String())
-			if err != nil {
-				return Packet{}, err
+			bufs := buf.String()
+			if bufs != "" {
+				var err error
+				ackId = new(int)
+				*ackId, err = strconv.Atoi(bufs)
+				if err != nil {
+					return Packet{}, err
+				}
 			}
 			buf.Reset()
 			payloadStart = true
@@ -157,4 +166,12 @@ func parsePacket(b []byte, decodePayload bool) (Packet, error) {
 		payloadIsEncoded:   !decodePayload,
 		AckId:              ackId,
 	}, nil
+}
+
+type connectNamespaceSuccess struct {
+	Sid string `json:"sid"`
+}
+
+func createConnectNamespace(nsp string, sid string) Packet {
+	return NewPacket(PacketTypeConnect, 0, nsp, connectNamespaceSuccess{Sid: sid}, nil)
 }

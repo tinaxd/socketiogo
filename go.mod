@@ -1,4 +1,4 @@
-module github.com/tinaxd/engineiogo
+module github.com/tinaxd/socketiogo
 
 go 1.18
 
