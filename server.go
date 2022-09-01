@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +20,10 @@ var upgrader = websocket.Upgrader{} // use default options
 const (
 	TRANSPORT_POLLING   = "polling"
 	TRANSPORT_WEBSOCKET = "websocket"
+)
+
+const (
+	UpgradeTimeout = 5 * time.Second
 )
 
 type OnConnectionHandler func(ss *ServerSocket)
@@ -90,6 +95,10 @@ type ServerSocket struct {
 
 	transport string
 	ws        *websocket.Conn
+
+	isUpgrading     bool
+	upgradeCtx      context.Context
+	upgradeCanceler context.CancelFunc
 }
 
 func (ss *ServerSocket) SetOnMessageHandler(handler OnMessageHandler) {
@@ -179,10 +188,14 @@ func (s *Server) engineIOHandler(w http.ResponseWriter, r *http.Request) {
 		s.handShake(w, r, transport)
 		return
 	} else {
+		if transport == "websocket" {
+			s.webSocketUpgrade(w, r, sid)
+			return
+		}
 		if r.Method == http.MethodPost {
-			s.messageOut(w, r, transport, sid)
+			s.messageOut(w, r, sid)
 		} else if r.Method == http.MethodGet {
-			s.messageIn(w, r, transport, sid)
+			s.messageIn(w, r, sid)
 		}
 	}
 }
@@ -279,39 +292,84 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 			s.onConnectionHandler(ss)
 		}
 
-		// ping thread
-		go s.pingFunc(ss)
-
 		ss.ws = c
-
 		s.socketsLock.Lock()
 		s.sockets[sid] = ss
 		s.socketsLock.Unlock()
 
-		go s.messageInWsWorker(ss)
-
-		go func() {
-			for {
-				ty, b, err := c.ReadMessage()
-				if err != nil {
-					log.Println("read:", err)
-					s.DropConnection(ss, cancelReasonBadRequest)
-					return
-				}
-
-				isBinary := ty == websocket.BinaryMessage
-				ok, reason := s.messageOutProcess(b, ss, false, isBinary)
-				if !ok {
-					log.Printf("websocket messageOutProcess: %v", reason)
-					s.DropConnection(ss, reason)
-					return
-				}
-			}
-		}()
+		s.startWebSocketConnection(ss, c, sid)
 	}
 }
 
-func (s *Server) messageIn(w http.ResponseWriter, r *http.Request, transport string, sid string) {
+func (s *Server) startWebSocketConnection(ss *ServerSocket, c *websocket.Conn, sid string) {
+	// ping thread
+	go s.pingFunc(ss)
+
+	go s.messageInWsWorker(ss)
+
+	go func() {
+		for {
+			ty, b, err := c.ReadMessage()
+			if err != nil {
+				log.Println("read:", err)
+				s.DropConnection(ss, cancelReasonBadRequest)
+				return
+			}
+
+			isBinary := ty == websocket.BinaryMessage
+			ok, reason := s.messageOutProcess(b, ss, false, isBinary)
+			if !ok {
+				log.Printf("websocket messageOutProcess: %v", reason)
+				s.DropConnection(ss, reason)
+				return
+			}
+		}
+	}()
+}
+
+func (s *Server) webSocketUpgrade(w http.ResponseWriter, r *http.Request, sid string) {
+	log.Printf("http upgrade request")
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Print("upgrade:", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	s.socketsLock.Lock()
+	ss, ok := s.sockets[sid]
+	if !ok {
+		s.socketsLock.Unlock()
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	ss.ws = c
+	// do not change transport until client sends "upgrade" packet
+	ss.transport = TRANSPORT_POLLING
+	s.socketsLock.Unlock()
+
+	ss.isUpgrading = true
+	ss.upgradeCtx, ss.upgradeCanceler = context.WithCancel(ss.ctx)
+	go func() {
+		log.Println("upgrade timeout timer started")
+		// if "upgrade" packet is not received in UpgradeTimeout seconds, cancel upgrade
+		select {
+		case <-ss.upgradeCtx.Done():
+			log.Println("upgrade timeout timer canceled")
+			return
+		case <-time.After(UpgradeTimeout):
+			if ss.ws != nil {
+				ss.ws.Close()
+				ss.ws = nil
+			}
+		}
+		ss.isUpgrading = false
+	}()
+
+	s.startWebSocketConnection(ss, c, sid)
+}
+
+func (s *Server) messageIn(w http.ResponseWriter, r *http.Request, sid string) {
 	s.socketsLock.Lock()
 	ss := s.sockets[sid]
 	s.socketsLock.Unlock()
@@ -320,11 +378,7 @@ func (s *Server) messageIn(w http.ResponseWriter, r *http.Request, transport str
 		return
 	}
 
-	if transport == TRANSPORT_POLLING {
-		s.messageInPolling(w, r, ss)
-	} else if transport == TRANSPORT_WEBSOCKET {
-		log.Println("messageIn websocket")
-	}
+	s.messageInPolling(w, r, ss)
 }
 
 func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *ServerSocket) {
@@ -398,7 +452,7 @@ func (s *Server) messageInWsWorker(ss *ServerSocket) {
 	}
 }
 
-func (s *Server) messageOut(w http.ResponseWriter, r *http.Request, transport string, sid string) {
+func (s *Server) messageOut(w http.ResponseWriter, r *http.Request, sid string) {
 	s.socketsLock.Lock()
 	ss := s.sockets[sid]
 	s.socketsLock.Unlock()
@@ -407,11 +461,7 @@ func (s *Server) messageOut(w http.ResponseWriter, r *http.Request, transport st
 		return
 	}
 
-	if transport == TRANSPORT_POLLING {
-		s.messageOutPolling(w, r, ss)
-	} else if transport == TRANSPORT_WEBSOCKET {
-		log.Println("messageOut websocket")
-	}
+	s.messageOutPolling(w, r, ss)
 }
 
 func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *ServerSocket) {
@@ -426,6 +476,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 
 	ok, reason := s.messageOutProcess(body, ss, true, false)
 	if !ok {
+		log.Printf("messageOutPolling: messageOutProcess: %v", reason)
 		w.WriteHeader(http.StatusBadRequest)
 		s.DropConnection(ss, reason)
 		return
@@ -473,6 +524,25 @@ func (s *Server) messageOutProcess(body []byte, ss *ServerSocket, usePayload boo
 			continue
 		}
 
+		// handle ping
+		if packet.Type == PacketTypePing && bytes.Equal(packet.Data, []byte("probe")) {
+			log.Printf("received upgrade request")
+			ss.sendPacket(Packet{
+				Type: PacketTypePong,
+				Data: []byte("probe"),
+			})
+			continue
+		}
+
+		// handle upgrade
+		if packet.Type == PacketTypeUpgrade {
+			log.Printf("received upgrade request")
+			ss.transport = TRANSPORT_WEBSOCKET
+			ss.isUpgrading = false
+			ss.upgradeCanceler()
+			continue
+		}
+
 		if packet.Type != PacketTypeMessage {
 			log.Printf("invalid packet type: %v", packet.Type)
 			return false, cancelReasonBadRequest
@@ -513,6 +583,7 @@ func (s *Server) DropConnection(ss *ServerSocket, reason cancelReason) {
 		if err := ss.ws.Close(); err != nil {
 			log.Printf("websocket close error: %v", err)
 		}
+		ss.ws = nil
 	}
 
 	s.socketsLock.Lock()
