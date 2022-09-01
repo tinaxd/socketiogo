@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -70,13 +71,16 @@ type ServerSocket struct {
 	sid string
 
 	onMessageHandler OnMessageHandler
-	messageQueue     chan Message
+	messageQueue     chan Packet
 
 	ctx          context.Context
 	canceler     context.CancelFunc
 	cancelReason cancelReason
 
 	isPollingNow bool
+
+	pingTimer time.Ticker
+	transport string
 }
 
 func (ss *ServerSocket) SetOnMessageHandler(handler OnMessageHandler) {
@@ -87,16 +91,16 @@ func (ss *ServerSocket) Sid() string {
 	return ss.sid
 }
 
-func (ss *ServerSocket) WaitForMessage() ([]Message, *cancelReason) {
+func (ss *ServerSocket) WaitForMessage() ([]Packet, *cancelReason) {
 	// wait for the first message
-	var firstMsg Message
+	var firstMsg Packet
 	select {
 	case firstMsg = <-ss.messageQueue:
 	case <-ss.ctx.Done():
 		reason := ss.cancelReason
 		return nil, &reason
 	}
-	msgs := []Message{firstMsg}
+	msgs := []Packet{firstMsg}
 
 	// add remain messages if exists
 LOOP:
@@ -117,10 +121,23 @@ LOOP:
 
 func (ss *ServerSocket) Send(ty MessageType, data []byte) {
 	log.Printf("queued data: %v", data)
+	packet := Packet{
+		Type:     PacketTypeMessage,
+		Data:     data,
+		IsBinary: ty == MessageTypeBinary,
+	}
 	select {
-	case ss.messageQueue <- Message{Type: ty, Data: data}:
+	case ss.messageQueue <- packet:
 	case <-ss.ctx.Done():
 		log.Println("Send: context done")
+	}
+}
+
+func (ss *ServerSocket) sendPacket(p Packet) {
+	select {
+	case ss.messageQueue <- p:
+	case <-ss.ctx.Done():
+		log.Println("sendPacket: context done")
 	}
 }
 
@@ -185,9 +202,11 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 	ctx, cancel := context.WithCancel(context.Background())
 	ss := &ServerSocket{
 		sid:          sid,
-		messageQueue: make(chan Message, 100),
+		messageQueue: make(chan Packet, 100),
 		ctx:          ctx,
 		canceler:     cancel,
+		pingTimer:    *time.NewTicker(time.Duration(s.Config.PingInterval) * time.Millisecond),
+		transport:    transport,
 	}
 	s.socketsLock.Lock()
 	s.sockets[sid] = ss
@@ -210,9 +229,13 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 		w.Header().Set("charset", "UTF-8")
 		w.Write([]byte(res))
 
+		// callback
 		if s.onConnectionHandler != nil {
 			s.onConnectionHandler(ss)
 		}
+
+		// ping thread
+		go ss.PingFunc()
 	} else if transport == TRANSPORT_WEBSOCKET {
 		c, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -240,9 +263,13 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 
 		c.WriteMessage(websocket.TextMessage, []byte(res))
 
+		// callback
 		if s.onConnectionHandler != nil {
 			s.onConnectionHandler(ss)
 		}
+
+		// ping thread
+		go ss.PingFunc()
 
 		for {
 			_, _, err := c.ReadMessage()
@@ -296,7 +323,7 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 
 	packets := make([][]byte, len(msgs))
 	for i, msg := range msgs {
-		packets[i] = encodeMessagePacket(msg.Type, msg.Data)
+		packets[i] = msg.Encode()
 	}
 
 	payload := encodePayload(packets)

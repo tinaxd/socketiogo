@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"log"
 )
 
 type PacketType int
@@ -72,6 +73,22 @@ func parsePayload(payloadStr []byte) ([]Packet, error) {
 	}
 
 	return packets, nil
+}
+
+func (p Packet) Encode() []byte {
+	if p.Type == PacketTypeMessage {
+		var ty MessageType
+		if p.IsBinary {
+			ty = MessageTypeBinary
+		} else {
+			ty = MessageTypeText
+		}
+		return encodeMessagePacket(ty, p.Data)
+	} else {
+		return []byte{byte(p.Type) + '0'}
+	}
+	log.Printf("Packet.Encode: unknown packet type: %v", p.Type)
+	return nil
 }
 
 func encodeMessagePacket(ty MessageType, data []byte) []byte {
