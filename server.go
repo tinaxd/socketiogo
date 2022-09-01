@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -23,6 +25,7 @@ type OnConnectionHandler func(ss *ServerSocket)
 type Server struct {
 	Config              ServerConfig
 	sockets             map[string]*ServerSocket
+	socketsLock         sync.Mutex
 	onConnectionHandler OnConnectionHandler
 }
 
@@ -60,6 +63,8 @@ type ServerSocket struct {
 	sid              string
 	onMessageHandler OnMessageHandler
 	messageQueue     chan Message
+	ctx              context.Context
+	canceler         context.CancelFunc
 }
 
 func (ss *ServerSocket) SetOnMessageHandler(handler OnMessageHandler) {
@@ -70,9 +75,14 @@ func (ss *ServerSocket) Sid() string {
 	return ss.sid
 }
 
-func (ss *ServerSocket) WaitForMessage() []Message {
+func (ss *ServerSocket) WaitForMessage() ([]Message, bool) {
 	// wait for the first message
-	firstMsg := <-ss.messageQueue
+	var firstMsg Message
+	select {
+	case firstMsg = <-ss.messageQueue:
+	case <-ss.ctx.Done():
+		return nil, false
+	}
 	msgs := []Message{firstMsg}
 
 	// add remain messages if exists
@@ -81,17 +91,23 @@ LOOP:
 		select {
 		case msg := <-ss.messageQueue:
 			msgs = append(msgs, msg)
+		case <-ss.ctx.Done():
+			return nil, false
 		default:
 			break LOOP
 		}
 	}
 
-	return msgs
+	return msgs, true
 }
 
 func (ss *ServerSocket) Send(ty MessageType, data []byte) {
 	log.Printf("queued data: %v", data)
-	ss.messageQueue <- Message{Type: ty, Data: data}
+	select {
+	case ss.messageQueue <- Message{Type: ty, Data: data}:
+	case <-ss.ctx.Done():
+		log.Println("Send: context done")
+	}
 }
 
 func (s *Server) engineIOHandler(w http.ResponseWriter, r *http.Request) {
@@ -143,18 +159,25 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 		sid = sidUuid.String()
 
 		// ensure sid is unique
+		s.socketsLock.Lock()
 		_, ok := s.sockets[sid]
+		s.socketsLock.Unlock()
 		if !ok {
 			break
 		}
 	}
 
 	// register ServerSocket
+	ctx, cancel := context.WithCancel(context.Background())
 	ss := &ServerSocket{
 		sid:          sid,
 		messageQueue: make(chan Message, 100),
+		ctx:          ctx,
+		canceler:     cancel,
 	}
+	s.socketsLock.Lock()
 	s.sockets[sid] = ss
+	s.socketsLock.Unlock()
 
 	// response
 	if transport == TRANSPORT_POLLING {
@@ -218,7 +241,9 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 }
 
 func (s *Server) messageIn(w http.ResponseWriter, r *http.Request, transport string, sid string) {
+	s.socketsLock.Lock()
 	ss := s.sockets[sid]
+	s.socketsLock.Unlock()
 	if ss == nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -233,7 +258,11 @@ func (s *Server) messageIn(w http.ResponseWriter, r *http.Request, transport str
 
 func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *ServerSocket) {
 	log.Printf("messageInPolling: WaitForMessage")
-	msgs := ss.WaitForMessage()
+	msgs, ok := ss.WaitForMessage()
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	log.Printf("messageInPolling: WaitForMessage done")
 
 	packets := make([][]byte, len(msgs))
@@ -251,7 +280,9 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 }
 
 func (s *Server) messageOut(w http.ResponseWriter, r *http.Request, transport string, sid string) {
+	s.socketsLock.Lock()
 	ss := s.sockets[sid]
+	s.socketsLock.Unlock()
 	if ss == nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -270,6 +301,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	if err != nil {
 		log.Print(err)
 		w.WriteHeader(http.StatusInternalServerError)
+		s.DropConnection(ss)
 		return
 	}
 
@@ -278,6 +310,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	packets, err := parsePayload(body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		s.DropConnection(ss)
 		return
 	}
 
@@ -287,6 +320,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	for _, packet := range packets {
 		if packet.Type != PacketTypeMessage {
 			w.WriteHeader(http.StatusBadRequest)
+			s.DropConnection(ss)
 			return
 		}
 	}
@@ -312,4 +346,12 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 	// log.Println("before response")
 
 	w.Write([]byte("ok"))
+}
+
+func (s *Server) DropConnection(ss *ServerSocket) {
+	ss.canceler()
+
+	s.socketsLock.Lock()
+	delete(s.sockets, ss.sid)
+	s.socketsLock.Unlock()
 }
