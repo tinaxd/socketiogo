@@ -4,7 +4,7 @@ import (
 	"log"
 	"net/http"
 
-	eio "github.com/tinaxd/engineiogo/engine"
+	eio "github.com/tinaxd/socketiogo/engine"
 )
 
 func main() {
