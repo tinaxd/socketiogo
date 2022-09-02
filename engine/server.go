@@ -542,6 +542,7 @@ func (s *Server) messageOutPolling(w http.ResponseWriter, r *http.Request, ss *S
 
 func (s *Server) messageOutProcess(body []byte, ss *ServerSocket, usePayload bool, isBinaryWebSocket bool) (bool, cancelReason) {
 	// //log.Printf("before parse Payload, body: %v", body)
+	ss.resetPing()
 
 	var packets []Packet
 	if usePayload {

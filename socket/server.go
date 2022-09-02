@@ -99,6 +99,14 @@ func CreateEventHandler(c EventCallback) EventHandler {
 	}
 }
 
+type partialMessage struct {
+	Args         binJsonValue
+	Ack          *AckInfo
+	Namespace    string
+	Event        string
+	Placeholders map[int]binJsonValue // placeholder num -> placeholder position
+}
+
 type ServerSocket struct {
 	s *Server
 
@@ -111,6 +119,11 @@ type ServerSocket struct {
 
 	eventHandlers     map[string]EventHandler // event name -> EventHandler
 	eventHandlersLock sync.Mutex
+
+	pm               partialMessage
+	requiredBinaries int
+	currentBinary    int
+	binaryLock       sync.Mutex
 }
 
 func (ss *ServerSocket) Sid() string {
@@ -193,11 +206,12 @@ func (s *Server) addServerSocket(ess *engine.ServerSocket) (*ServerSocket, error
 	}
 
 	ss := &ServerSocket{
-		s:             s,
-		sid:           sid,
-		engineSocket:  ess,
-		eventHandlers: make(map[string]EventHandler),
-		namespace:     "/",
+		s:                s,
+		sid:              sid,
+		engineSocket:     ess,
+		eventHandlers:    make(map[string]EventHandler),
+		namespace:        "/",
+		requiredBinaries: 0,
 	}
 
 	s.socketsLock.Lock()
@@ -212,6 +226,34 @@ func (s *Server) addServerSocket(ess *engine.ServerSocket) (*ServerSocket, error
 }
 
 func (s *Server) messageHandler(ss *ServerSocket, msg engine.Message) {
+	log.Printf("new engine message: %v:%v", msg.Type, msg.Data)
+	finish, err := func() (bool, error) {
+		ss.binaryLock.Lock()
+		sb := ss.requiredBinaries
+		ss.binaryLock.Unlock()
+		if sb == 0 {
+			return false, nil
+		}
+		if msg.Type == engine.MessageTypeBinary {
+			s.handleBinary(ss, msg.Data)
+			return true, nil
+		} else {
+			log.Printf("expected binary message, got %v", msg)
+			return false, errors.New("expected binary message")
+		}
+	}()
+
+	if err != nil {
+		s.DropConnection(ss)
+		return
+	}
+
+	if finish {
+		return
+	}
+
+	log.Println("handle non-binary")
+
 	p, err := parsePacket(msg.Data, false)
 	if err != nil {
 		log.Println(err)
@@ -224,7 +266,9 @@ func (s *Server) messageHandler(ss *ServerSocket, msg engine.Message) {
 	case PacketTypeDisconnect:
 		s.handleDisconnect(ss, p)
 	case PacketTypeEvent:
-		s.handleEvent(ss, p)
+		s.handleEvent(ss, p, false)
+	case PacketTypeBinaryEvent:
+		s.handleEvent(ss, p, true)
 	}
 }
 
@@ -259,7 +303,63 @@ func (s *Server) handleDisconnect(ss *ServerSocket, p Packet) {
 	s.disconnectFromNamespace(ss, nsp)
 }
 
-func (s *Server) handleEvent(ss *ServerSocket, p Packet) {
+func (s *Server) handleBinary(ss *ServerSocket, bin []byte) {
+	log.Println("handle binary")
+	ss.binaryLock.Lock()
+	defer ss.binaryLock.Unlock()
+	ss.currentBinary++
+	gotBinaries := ss.currentBinary
+	placeholderNum := gotBinaries - 1
+
+	// assign binary to partial message
+	toBeReplaced, ok := ss.pm.Placeholders[placeholderNum]
+	if !ok {
+		log.Println("got unexpected binary")
+		return
+	}
+	toBeReplaced.replacePlaceholder(placeholderNum, bin)
+
+	if gotBinaries == ss.requiredBinaries {
+		ss.requiredBinaries = 0
+
+		// got all binaries, complete the message
+		obj := convertToJson(ss.pm.Args)
+		arrayObj, ok := obj.([]interface{})
+		if !ok {
+			log.Println("got unexpected message")
+			s.DropConnection(ss)
+			return
+		}
+
+		// callback
+		func() {
+			ss.eventHandlersLock.Lock()
+			defer ss.eventHandlersLock.Unlock()
+			h, ok := ss.eventHandlers[ss.pm.Event]
+			if ok {
+				h.callback(&Message{
+					Args:      arrayObj,
+					namespace: ss.pm.Namespace,
+					ack:       ss.pm.Ack,
+				})
+			}
+		}()
+
+		ss.pm.Ack = nil
+		ss.pm.Args = nil
+		ss.pm.Namespace = ""
+		ss.pm.Event = ""
+	}
+}
+
+func (s *Server) handleEvent(ss *ServerSocket, p Packet, hasBinary bool) {
+	if hasBinary {
+		ss.binaryLock.Lock()
+		defer ss.binaryLock.Unlock()
+		ss.requiredBinaries = p.NBinaryAttachments
+		ss.currentBinary = 0
+	}
+
 	if !p.payloadIsEncoded {
 		panic("payload is already decoded (unreachable)")
 	}
@@ -304,11 +404,30 @@ func (s *Server) handleEvent(ss *ServerSocket, p Packet) {
 		return
 	}
 
-	h.callback(&Message{
-		Args:      args,
-		ack:       ack,
-		namespace: p.Namespace,
-	})
+	if hasBinary {
+		h.callback(&Message{
+			Args:      args,
+			ack:       ack,
+			namespace: p.Namespace,
+		})
+	} else {
+		// search for binary placeholders
+		bArgs, placeholders := convertToBinJson(args)
+		count := len(placeholders)
+
+		if count != p.NBinaryAttachments {
+			// invalid format
+			s.DropConnection(ss)
+			return
+		}
+
+		// store in partialMessage
+		ss.pm.Args = bArgs
+		ss.pm.Namespace = p.Namespace
+		ss.pm.Ack = ack
+		ss.pm.Event = event
+		ss.pm.Placeholders = placeholders
+	}
 }
 
 func (s *Server) send(ss *ServerSocket, p Packet) error {

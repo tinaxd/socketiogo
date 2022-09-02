@@ -12,6 +12,7 @@ func (s *Server) pingFunc(ss *ServerSocket) {
 	case <-ss.ctx.Done():
 		return
 	case <-ss.pingTimer.C:
+		ss.pingTimer = nil
 	}
 
 	ss.sendPing()
@@ -23,6 +24,12 @@ func (ss *ServerSocket) sendPing() {
 	ss.sendPacket(Packet{
 		Type: PacketTypePing,
 	})
+}
+
+func (ss *ServerSocket) resetPing() {
+	if ss.pingTimer != nil {
+		ss.pingTimer.Reset(ss.pingInterval)
+	}
 }
 
 func (s *Server) handlePong(ss *ServerSocket) {
