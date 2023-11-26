@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -72,6 +73,7 @@ const (
 	cancelReasonNoPong
 	cancelReasonCloseRequested
 	cancelReasonPollingTimeout
+	cancelReasonUpgradeToWs
 )
 
 type ServerSocket struct {
@@ -83,6 +85,8 @@ type ServerSocket struct {
 	ctx          context.Context
 	canceler     context.CancelFunc
 	cancelReason cancelReason
+
+	pollingUpgradeChan chan struct{}
 
 	isPollingNow bool
 
@@ -118,6 +122,9 @@ func (ss *ServerSocket) WaitForMessage(timeout time.Duration) ([]Packet, *cancel
 		case <-ss.ctx.Done():
 			reason := ss.cancelReason
 			return nil, &reason
+		case <-ss.pollingUpgradeChan:
+			reason := cancelReasonUpgradeToWs
+			return nil, &reason
 		case <-time.After(timeout):
 			reason := cancelReasonPollingTimeout
 			return nil, &reason
@@ -135,14 +142,29 @@ func (ss *ServerSocket) WaitForMessage(timeout time.Duration) ([]Packet, *cancel
 	// add remain messages if exists
 LOOP:
 	for {
-		select {
-		case msg := <-ss.messageQueue:
-			msgs = append(msgs, msg)
-		case <-ss.ctx.Done():
-			reason := ss.cancelReason
-			return nil, &reason
-		default:
-			break LOOP
+		if timeout != 0 {
+			select {
+			case msg := <-ss.messageQueue:
+				msgs = append(msgs, msg)
+			case <-ss.ctx.Done():
+				reason := ss.cancelReason
+				return nil, &reason
+			case <-ss.pollingUpgradeChan:
+				reason := cancelReasonUpgradeToWs
+				return nil, &reason
+			default:
+				break LOOP
+			}
+		} else {
+			select {
+			case msg := <-ss.messageQueue:
+				msgs = append(msgs, msg)
+			case <-ss.ctx.Done():
+				reason := ss.cancelReason
+				return nil, &reason
+			default:
+				break LOOP
+			}
 		}
 	}
 
@@ -262,13 +284,14 @@ func (s *Server) handShake(w http.ResponseWriter, r *http.Request, transport str
 	pingInterval := time.Duration(s.Config.PingInterval) * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	ss := &ServerSocket{
-		sid:          sid,
-		messageQueue: make(chan Packet, 100),
-		ctx:          ctx,
-		canceler:     cancel,
-		transport:    transport,
-		pingInterval: pingInterval,
-		pongTimeout:  time.Duration(s.Config.PingTimeout) * time.Millisecond,
+		sid:                sid,
+		messageQueue:       make(chan Packet, 100),
+		ctx:                ctx,
+		canceler:           cancel,
+		pollingUpgradeChan: make(chan struct{}, 10),
+		transport:          transport,
+		pingInterval:       pingInterval,
+		pongTimeout:        time.Duration(s.Config.PingTimeout) * time.Millisecond,
 	}
 
 	// response
@@ -413,6 +436,10 @@ func (s *Server) webSocketUpgrade(w http.ResponseWriter, r *http.Request, sid st
 		ss.isUpgrading = false
 	}()
 
+	// stop current connection
+	// and send noop
+	ss.pollingUpgradeChan <- struct{}{}
+
 	s.startWebSocketConnection(ss, c, sid)
 }
 
@@ -435,9 +462,16 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 	}
 
 	if ss.isPollingNow {
-		//log.Println("messageInPolling: already polling")
+		log.Println("messageInPolling: already polling")
 		w.WriteHeader(http.StatusInternalServerError)
 		s.DropConnection(ss, cancelReasonDoublePolling)
+		return
+	}
+
+	if ss.isUpgrading {
+		log.Println("messageInPolling: received polling request while upgrading")
+		w.WriteHeader(http.StatusOK)
+		w.Write(encodeNoopPacket())
 		return
 	}
 
@@ -454,6 +488,9 @@ func (s *Server) messageInPolling(w http.ResponseWriter, r *http.Request, ss *Se
 			w.Write(encodeNoopPacket())
 			return
 		} else if *cancelReason == cancelReasonPollingTimeout {
+			w.Write(encodeNoopPacket())
+			return
+		} else if *cancelReason == cancelReasonUpgradeToWs {
 			w.Write(encodeNoopPacket())
 			return
 		} else {
@@ -582,7 +619,7 @@ func (s *Server) messageOutProcess(body []byte, ss *ServerSocket, usePayload boo
 
 		// handle ping
 		if packet.Type == PacketTypePing && bytes.Equal(packet.Data, []byte("probe")) {
-			//log.Printf("received upgrade request")
+			// log.Printf("received upgrade request (ping probe), replying with pong probe")
 			ss.sendPacket(Packet{
 				Type: PacketTypePong,
 				Data: []byte("probe"),
@@ -592,7 +629,7 @@ func (s *Server) messageOutProcess(body []byte, ss *ServerSocket, usePayload boo
 
 		// handle upgrade
 		if packet.Type == PacketTypeUpgrade {
-			//log.Printf("received upgrade request")
+			// log.Printf("received upgrade request (upgrade)")
 			ss.transport = TRANSPORT_WEBSOCKET
 			ss.isUpgrading = false
 			ss.upgradeCanceler()
