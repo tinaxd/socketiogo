@@ -258,7 +258,9 @@ func (s *Server) messageHandler(ss *ServerSocket, msg engine.Message) {
 	if err != nil {
 		log.Println(err)
 		s.DropConnection(ss)
+		return
 	}
+	log.Printf("Packet: %v", p)
 
 	switch p.Type {
 	case PacketTypeConnect:
@@ -315,6 +317,7 @@ func (s *Server) handleBinary(ss *ServerSocket, bin []byte) {
 	toBeReplaced, ok := ss.pm.Placeholders[placeholderNum]
 	if !ok {
 		log.Println("got unexpected binary")
+		s.DropConnection(ss)
 		return
 	}
 	toBeReplaced.replacePlaceholder(placeholderNum, bin)
@@ -364,21 +367,32 @@ func (s *Server) handleEvent(ss *ServerSocket, p Packet, hasBinary bool) {
 		panic("payload is already decoded (unreachable)")
 	}
 
-	var decodedI []interface{}
+	var decodedI interface{}
 	if err := json.Unmarshal(p.Payload.([]byte), &decodedI); err != nil {
-		log.Println(err)
+		log.Printf("handleEvent: %v", err)
 		s.DropConnection(ss)
 		return
 	}
 
-	decoded := decodedI
+	decoded, ok := decodedI.([]interface{})
+	if !ok {
+		log.Println("handleEvent: invalid payload (not an array)")
+		s.DropConnection(ss)
+		return
+	}
 	if len(decoded) < 1 {
-		log.Println("handleEvent: invalid payload")
+		log.Println("handleEvent: invalid payload (empty array)")
 		s.DropConnection(ss)
 		return
 	}
 
-	event := decoded[0].(string)
+	event, ok := decoded[0].(string)
+	if !ok {
+		log.Println("handleEvent: invalid payload (event name not a string)")
+		s.DropConnection(ss)
+		return
+	}
+
 	args := decoded[1:]
 
 	var ack *AckInfo = nil
@@ -390,21 +404,20 @@ func (s *Server) handleEvent(ss *ServerSocket, p Packet, hasBinary bool) {
 		}
 	}
 
+	log.Printf("event=%s args=%v", event, args)
+
 	var (
-		h  EventHandler
-		ok bool
+		h EventHandler
 	)
-	func() {
-		ss.eventHandlersLock.Lock()
-		defer ss.eventHandlersLock.Unlock()
-		h, ok = ss.eventHandlers[event]
-	}()
+	ss.eventHandlersLock.Lock()
+	h, ok = ss.eventHandlers[event]
+	ss.eventHandlersLock.Unlock()
 
 	if !ok {
 		return
 	}
 
-	if hasBinary {
+	if !hasBinary {
 		h.callback(&Message{
 			Args:      args,
 			ack:       ack,
@@ -417,6 +430,7 @@ func (s *Server) handleEvent(ss *ServerSocket, p Packet, hasBinary bool) {
 
 		if count != p.NBinaryAttachments {
 			// invalid format
+			log.Printf("handleEvent: invalid binary placeholders count: %v", count)
 			s.DropConnection(ss)
 			return
 		}
